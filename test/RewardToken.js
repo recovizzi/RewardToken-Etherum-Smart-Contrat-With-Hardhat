@@ -114,4 +114,153 @@ describe("RewardToken", function () {
       expect(await rewardToken.getTimeUntilNextClaim(user1.address)).to.equal(0);
     });
   });
+
+  describe("Owner Functions", function () {
+    it("Should set the correct owner on deployment", async function () {
+      const { rewardToken, owner } = await loadFixture(deployRewardTokenFixture);
+      expect(await rewardToken.owner()).to.equal(owner.address);
+    });
+
+    it("Should allow owner to add tokens to address", async function () {
+      const { rewardToken, owner, user1 } = await loadFixture(deployRewardTokenFixture);
+      const amount = ethers.parseEther("500");
+      await rewardToken.connect(owner).addTokensToAddress(user1.address, amount);
+      expect(await rewardToken.balanceOf(user1.address)).to.equal(amount);
+    });
+
+    it("Should prevent non-owner from adding tokens", async function () {
+      const { rewardToken, user1, user2 } = await loadFixture(deployRewardTokenFixture);
+      const amount = ethers.parseEther("500");
+      await expect(
+        rewardToken.connect(user1).addTokensToAddress(user2.address, amount)
+      ).to.be.revertedWithCustomError(rewardToken, "OwnableUnauthorizedAccount");
+    });
+
+    it("Should prevent adding tokens to zero address", async function () {
+      const { rewardToken, owner } = await loadFixture(deployRewardTokenFixture);
+      const amount = ethers.parseEther("500");
+      await expect(
+        rewardToken.connect(owner).addTokensToAddress(ethers.ZeroAddress, amount)
+      ).to.be.revertedWith("Cannot add tokens to zero address");
+    });
+
+    it("Should prevent adding zero tokens", async function () {
+      const { rewardToken, owner, user1 } = await loadFixture(deployRewardTokenFixture);
+      await expect(
+        rewardToken.connect(owner).addTokensToAddress(user1.address, 0)
+      ).to.be.revertedWith("Amount must be greater than 0");
+    });
+
+    it("Should prevent adding tokens when contract has insufficient balance", async function () {
+      const { rewardToken, owner, user1 } = await loadFixture(deployRewardTokenFixture);
+      const tooMuch = ethers.parseEther("2000000");
+      await expect(
+        rewardToken.connect(owner).addTokensToAddress(user1.address, tooMuch)
+      ).to.be.revertedWith("Insufficient contract balance");
+    });
+  });
+
+  describe("Token Supply Management", function () {
+    it("Should initialize with correct available tokens", async function () {
+      const { rewardToken } = await loadFixture(deployRewardTokenFixture);
+      const availableTokens = await rewardToken.getAvailableTokens();
+      expect(availableTokens).to.equal(ethers.parseEther("1000000"));
+    });
+
+    it("Should decrease available tokens after claim", async function () {
+      const { rewardToken, user1 } = await loadFixture(deployRewardTokenFixture);
+      const initialAvailable = await rewardToken.getAvailableTokens();
+      await rewardToken.connect(user1).claimTokens();
+      const finalAvailable = await rewardToken.getAvailableTokens();
+      expect(finalAvailable).to.equal(initialAvailable - ethers.parseEther("100"));
+    });
+
+    it("Should update available tokens correctly after Russian Roulette loss", async function () {
+      const { rewardToken, user1 } = await loadFixture(deployRewardTokenFixture);
+      await rewardToken.connect(user1).claimTokens();
+      const betAmount = ethers.parseEther("50");
+      const initialAvailable = await rewardToken.getAvailableTokens();
+      
+      // Force a loss by manipulating the block timestamp to get a predictable random number
+      await time.setNextBlockTimestamp((await time.latest()) + 1);
+      await rewardToken.connect(user1).playRussianRoulette(betAmount, 5);
+      
+      const finalAvailable = await rewardToken.getAvailableTokens();
+      expect(finalAvailable).to.equal(initialAvailable.add(betAmount));
+    });
+
+    it("Should prevent claims when insufficient tokens available", async function () {
+      const { rewardToken, owner, user1 } = await loadFixture(deployRewardTokenFixture);
+      // Drain almost all tokens
+      const almostAll = ethers.parseEther("999900");
+      await rewardToken.connect(owner).addTokensToAddress(user1.address, almostAll);
+      
+      // Try to claim the remaining tokens
+      await expect(rewardToken.connect(user1).claimTokens())
+        .to.be.revertedWith("Insufficient tokens available for distribution");
+    });
+  });
+
+  describe("Token Burning", function () {
+    it("Should allow owner to burn tokens with proper event emission", async function () {
+      const { rewardToken, owner } = await loadFixture(deployRewardTokenFixture);
+      const burnAmount = ethers.parseEther("1000");
+      const initialSupply = await rewardToken.totalSupply();
+      const initialAvailable = await rewardToken.getAvailableTokens();
+
+      await expect(rewardToken.connect(owner).burnTokens(burnAmount))
+        .to.emit(rewardToken, "Transfer")
+        .withArgs(rewardToken.target, ethers.ZeroAddress, burnAmount);
+
+      expect(await rewardToken.totalSupply()).to.equal(initialSupply - burnAmount);
+      expect(await rewardToken.getAvailableTokens()).to.equal(initialAvailable - burnAmount);
+      expect(await rewardToken.balanceOf(rewardToken.target)).to.equal(initialSupply - burnAmount);
+    });
+
+    it("Should prevent non-owner from burning tokens", async function () {
+      const { rewardToken, user1 } = await loadFixture(deployRewardTokenFixture);
+      await expect(rewardToken.connect(user1).burnTokens(ethers.parseEther("1000")))
+        .to.be.revertedWithCustomError(rewardToken, "OwnableUnauthorizedAccount")
+        .withArgs(user1.address);
+    });
+
+    it("Should accurately track available tokens after multiple burns", async function () {
+      const { rewardToken, owner } = await loadFixture(deployRewardTokenFixture);
+      const burnAmount = ethers.parseEther("1000");
+      
+      for(let i = 0; i < 3; i++) {
+        await rewardToken.connect(owner).burnTokens(burnAmount);
+      }
+
+      const expectedRemaining = ethers.parseEther("1000000").sub(burnAmount.mul(3));
+      expect(await rewardToken.getAvailableTokens()).to.equal(expectedRemaining);
+      expect(await rewardToken.totalSupply()).to.equal(expectedRemaining);
+    });
+
+    it("Should prevent burning tokens when contract has insufficient balance", async function () {
+      const { rewardToken, owner, user1 } = await loadFixture(deployRewardTokenFixture);
+      
+      const almostAll = ethers.parseEther("999000");
+      await rewardToken.connect(owner).addTokensToAddress(user1.address, almostAll);
+      
+      const remainingPlus = ethers.parseEther("2000");
+      await expect(rewardToken.connect(owner).burnTokens(remainingPlus))
+        .to.be.revertedWith("Insufficient balance in contract");
+    });
+
+    it("Should maintain correct token economics after burning", async function () {
+      const { rewardToken, owner, user1 } = await loadFixture(deployRewardTokenFixture);
+      
+      const burnAmount = ethers.parseEther("100000");
+      await rewardToken.connect(owner).burnTokens(burnAmount);
+      
+      await rewardToken.connect(user1).claimTokens();
+      
+      await rewardToken.connect(user1).playRussianRoulette(ethers.parseEther("10"), 1);
+      
+      const transferAmount = ethers.parseEther("10");
+      await expect(rewardToken.connect(user1).transferTokens(owner.address, transferAmount))
+        .to.not.be.reverted;
+    });
+  });
 });
