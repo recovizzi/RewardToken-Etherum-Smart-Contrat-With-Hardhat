@@ -6,13 +6,15 @@ const { buildModule } = require("@nomicfoundation/hardhat-ignition/modules");
 module.exports = buildModule("RewardTokenModule", (m) => {
   const rewardToken = m.contract("RewardToken", [], {
     gasLimit: 5000000,
-    value: 0,
     from: m.deployer
   });
 
-  // Add post-deployment verification
-  m.afterDeploy(async (_, context) => {
-    const deployedToken = await context.contracts.rewardToken;
+  m.onDeploy(async () => {
+    console.log("Starting deployment of RewardToken...");
+  });
+
+  m.onDeployComplete(async (context) => {
+    const deployedToken = context.contracts.rewardToken;
     console.log("RewardToken deployed to:", deployedToken.address);
 
     // Verify initial supply and available tokens
